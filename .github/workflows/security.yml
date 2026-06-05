@@ -1,0 +1,76 @@
+name: ASPM Security Scan
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  security-scan:
+    name: Security Scan & Quality Gate
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout code ─────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 2. Set up Python ─────────────────────────────────────────
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # ── 3. Run Bandit (SAST) ──────────────────────────────────────
+      - name: Run Bandit
+        run: |
+          pip install bandit --quiet
+          bandit -r . -f json -o bandit-report.json \
+            --exclude ./.venv,./venv,./node_modules \
+            -q || true
+          echo "Bandit findings:"
+          python -c "
+          import json, sys
+          try:
+            d = json.load(open('bandit-report.json'))
+            results = d.get('results', [])
+            print(f'  Total: {len(results)} issues')
+            for r in results[:5]:
+              print(f'  [{r[\"issue_severity\"]}] {r[\"issue_text\"]} @ {r[\"filename\"]}:{r[\"line_number\"]}')
+          except Exception as e:
+            print(f'Could not read report: {e}')
+          "
+
+      # ── 4. Download ASPM agent ────────────────────────────────────
+      - name: Download ASPM Agent
+        run: |
+          curl -sSfL "${{ secrets.ASPM_URL }}/ci/aspm_agent.py" -o aspm_agent.py
+          echo "Agent downloaded:"
+          head -5 aspm_agent.py
+
+      # ── 5. Upload Bandit report to ASPM ──────────────────────────
+      - name: Upload Bandit report to ASPM
+        if: hashFiles('bandit-report.json') != ''
+        run: |
+          python aspm_agent.py upload \
+            --url "${{ secrets.ASPM_URL }}" \
+            --project "${{ secrets.ASPM_PROJECT_ID }}" \
+            --file bandit-report.json \
+            --scanner bandit
+
+      # ── 6. Check Quality Gate ─────────────────────────────────────
+      #   Exit code 1 → workflow fails → red ✗ in GitHub
+      - name: Quality Gate
+        run: |
+          python aspm_agent.py gate \
+            --url "${{ secrets.ASPM_URL }}" \
+            --project "${{ secrets.ASPM_PROJECT_ID }}"
+
+      # ── 7. Upload reports as artifacts (always, even on failure) ─
+      - name: Upload scan artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-reports
+          path: bandit-report.json
+          retention-days: 14
